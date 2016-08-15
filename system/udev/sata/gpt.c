@@ -21,6 +21,7 @@
 #include <magenta/types.h>
 #include <runtime/completion.h>
 #include <runtime/mutex.h>
+#include <system/listnode.h>
 #include <sys/param.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -68,6 +69,17 @@ static uint64_t getsize(gptpart_device_t* dev) {
     return lbacount * dev->blksize;
 }
 
+static mx_status_t reread(mx_device_t* parent) {
+    // remove all children devices
+    mx_device_t* dev = NULL;
+    mx_device_t* temp = NULL;
+    list_for_every_entry_safe(&parent->children, dev, temp, mx_device_t, node) {
+        device_remove(dev);
+    }
+    // reread the partition table
+    return gpt_bind(_driver_gpt, parent);
+}
+
 // implement device protocol:
 
 static ssize_t gpt_ioctl(mx_device_t* dev, uint32_t op, const void* cmd, size_t cmdlen, void* reply, size_t max) {
@@ -98,6 +110,9 @@ static ssize_t gpt_ioctl(mx_device_t* dev, uint32_t op, const void* cmd, size_t 
         utf16_to_cstring(name, device->gpt_entry.name, MIN((max - 1) * 2, GPT_NAME_LEN));
         return strnlen(name, GPT_NAME_LEN / 2);
     }
+    case BLOCK_OP_RR_PART: {
+        return reread(dev->parent);
+    }
     default:
         return ERR_NOT_SUPPORTED;
     }
@@ -125,10 +140,17 @@ static mx_off_t gpt_getsize(mx_device_t* dev) {
     return getsize(get_gptpart_device(dev));
 }
 
+static mx_status_t gpt_release(mx_device_t* dev) {
+    gptpart_device_t* device = get_gptpart_device(dev);
+    free(device);
+    return NO_ERROR;
+}
+
 static mx_protocol_device_t gpt_proto = {
     .ioctl = gpt_ioctl,
     .iotxn_queue = gpt_iotxn_queue,
     .get_size = gpt_getsize,
+    .release = gpt_release,
 };
 
 static void gpt_read_sync_complete(iotxn_t* txn) {
